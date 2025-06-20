@@ -1,0 +1,10 @@
+target/
+
+.env
+.tool-versions
+allure-results
+.allure
+
+
+maven_output.log
+.idea/

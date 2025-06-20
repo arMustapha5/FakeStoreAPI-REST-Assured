@@ -1,0 +1,301 @@
+name: Run API Tests with Allure
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build, Test, and Generate Allure Report
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          
+      - name: Set up Maven cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+            
+      - name: Clean and Install
+        run: mvn clean install -B
+        
+      - name: Run tests and capture output
+        id: test_step
+        continue-on-error: true
+        run: |
+          mvn clean test -B 2>&1 | tee maven_output.log
+          echo "test_exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+          
+      - name: Generate Allure Report
+        if: always()
+        run: mvn allure:report -B
+        
+      - name: Verify Allure Report Generation
+        if: always()
+        run: |
+          if [ -d "target/site/allure-maven-plugin" ]; then
+            echo "✅ Allure report generated successfully"
+            echo "📁 Report files:"
+            ls -la target/site/allure-maven-plugin/
+          else
+            echo "❌ Allure report generation failed"
+            exit 1
+          fi
+          
+      - name: Parse test results
+        id: parse_results
+        if: always()
+        run: |
+          if [ -f "maven_output.log" ]; then
+            SUMMARY_LINE=$(grep -E "Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+" maven_output.log | tail -1)
+            
+            if [ -n "$SUMMARY_LINE" ]; then
+              TESTS_RUN=$(echo "$SUMMARY_LINE" | grep -Eo "Tests run: [0-9]+" | grep -Eo "[0-9]+")
+              FAILURES=$(echo "$SUMMARY_LINE" | grep -Eo "Failures: [0-9]+" | grep -Eo "[0-9]+")
+              ERRORS=$(echo "$SUMMARY_LINE" | grep -Eo "Errors: [0-9]+" | grep -Eo "[0-9]+")
+              SKIPPED=$(echo "$SUMMARY_LINE" | grep -Eo "Skipped: [0-9]+" | grep -Eo "[0-9]+")
+            fi
+          fi
+          
+          TESTS_RUN=${TESTS_RUN:-0}
+          FAILURES=${FAILURES:-0}
+          ERRORS=${ERRORS:-0}
+          SKIPPED=${SKIPPED:-0}
+          
+          PASSED=$((TESTS_RUN - FAILURES - ERRORS - SKIPPED))
+          TOTAL_FAILED=$((FAILURES + ERRORS))
+          
+          if [ $TOTAL_FAILED -eq 0 ] && [ $TESTS_RUN -gt 0 ]; then
+            TEST_STATUS="PASSED"
+            STATUS_COLOR="28a745"
+            STATUS_EMOJI="✅"
+          elif [ $TESTS_RUN -eq 0 ]; then
+            TEST_STATUS="NO TESTS"
+            STATUS_COLOR="ffc107"
+            STATUS_EMOJI="⚠️"
+          else
+            TEST_STATUS="FAILED"
+            STATUS_COLOR="dc3545"
+            STATUS_EMOJI="❌"
+          fi
+          
+          echo "tests_run=$TESTS_RUN" >> $GITHUB_OUTPUT
+          echo "passed=$PASSED" >> $GITHUB_OUTPUT
+          echo "failed=$TOTAL_FAILED" >> $GITHUB_OUTPUT
+          echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
+          echo "test_status=$TEST_STATUS" >> $GITHUB_OUTPUT
+          echo "status_color=$STATUS_COLOR" >> $GITHUB_OUTPUT
+          echo "status_emoji=$STATUS_EMOJI" >> $GITHUB_OUTPUT
+          
+      - name: Send Slack Notification
+        if: always() && env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          COMMIT_URL="https://github.com/${{ github.repository }}/commit/${{ github.sha }}"
+          
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{
+              "attachments": [
+                {
+                  "color": "'"${{ steps.parse_results.outputs.status_color }}"'",
+                  "title": "🧪 FakeStore API Tests - ${{ steps.parse_results.outputs.test_status }}",
+                  "fields": [
+                    {
+                      "title": "Repository",
+                      "value": "'"${{ github.repository }}"'",
+                      "short": true
+                    },
+                    {
+                      "title": "Branch",
+                      "value": "'"${{ github.ref_name }}"'",
+                      "short": true
+                    },
+                    {
+                      "title": "Total Tests",
+                      "value": "'"${{ steps.parse_results.outputs.tests_run }}"'",
+                      "short": true
+                    },
+                    {
+                      "title": "Status",
+                      "value": "'"${{ steps.parse_results.outputs.status_emoji }} ${{ steps.parse_results.outputs.test_status }}"'",
+                      "short": true
+                    },
+                    {
+                      "title": "✅ Passed",
+                      "value": "'"${{ steps.parse_results.outputs.passed }}"'",
+                      "short": true
+                    },
+                    {
+                      "title": "❌ Failed",
+                      "value": "'"${{ steps.parse_results.outputs.failed }}"'",
+                      "short": true
+                    },
+                    {
+                      "title": "⏭️ Skipped",
+                      "value": "'"${{ steps.parse_results.outputs.skipped }}"'",
+                      "short": true
+                    },
+                    {
+                      "title": "👤 Triggered by",
+                      "value": "'"${{ github.actor }}"'",
+                      "short": true
+                    },
+                    {
+                      "title": "📝 Commit",
+                      "value": "<'"$COMMIT_URL"'|${{ github.sha }}>",
+                      "short": false
+                    }
+                  ],
+                  "actions": [
+                    {
+                      "type": "button", 
+                      "text": "🔍 View Workflow",
+                      "url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ],
+                  "footer": "GitHub Actions",
+                  "ts": '${{ github.event.head_commit.timestamp }}'
+                }
+              ]
+            }' \
+            "$SLACK_WEBHOOK_URL"
+            
+      - name: Send Email Notification
+        if: always() && env.EMAIL_TO != ''
+        env:
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: |
+          # Generate HTML email content
+          HTML_CONTENT=$(cat <<EOF
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <title>Test Results: ${{ steps.parse_results.outputs.test_status }}</title>
+            <style>
+              body { font-family: Arial, sans-serif; margin: 20px; color: #333; }
+              .header { background-color: #f8f9fa; padding: 20px; border-radius: 5px; }
+              .status { font-size: 24px; font-weight: bold; color: #${{ steps.parse_results.outputs.status_color }}; margin: 10px 0; }
+              .summary { background-color: #e9ecef; padding: 15px; border-radius: 5px; margin: 20px 0; }
+              table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+              th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+              .passed { background-color: #d4edda; }
+              .failed { background-color: #f8d7da; }
+              .skipped { background-color: #fff3cd; }
+              .button { display: inline-block; background-color: #6c757d; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin: 10px 0; }
+              .footer { margin-top: 30px; font-size: 12px; color: #6c757d; }
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <h1>🧪 FakeStore API Tests</h1>
+              <div class="status">${{ steps.parse_results.outputs.status_emoji }} ${{ steps.parse_results.outputs.test_status }}</div>
+            </div>
+            
+            <div class="summary">
+              <h2>📊 Test Summary</h2>
+              <ul>
+                <li><strong>Repository:</strong> ${{ github.repository }}</li>
+                <li><strong>Branch:</strong> ${{ github.ref_name }}</li>
+                <li><strong>Triggered by:</strong> ${{ github.actor }}</li>
+                <li><strong>Timestamp:</strong> $(date)</li>
+              </ul>
+            </div>
+            
+            <h2>📈 Test Statistics</h2>
+            <table>
+              <tr>
+                <th>Metric</th>
+                <th>Count</th>
+              </tr>
+              <tr>
+                <td>Total Tests</td>
+                <td>${{ steps.parse_results.outputs.tests_run }}</td>
+              </tr>
+              <tr class="passed">
+                <td>✅ Passed</td>
+                <td>${{ steps.parse_results.outputs.passed }}</td>
+              </tr>
+              <tr class="failed">
+                <td>❌ Failed</td>
+                <td>${{ steps.parse_results.outputs.failed }}</td>
+              </tr>
+              <tr class="skipped">
+                <td>⏭️ Skipped</td>
+                <td>${{ steps.parse_results.outputs.skipped }}</td>
+              </tr>
+            </table>
+            
+            <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" class="button">
+              🔍 View Workflow Run
+            </a>
+            
+            <div class="footer">
+              <p>This is an automated message from your GitHub Actions workflow.</p>
+              <p>Commit: <a href="https://github.com/${{ github.repository }}/commit/${{ github.sha }}">${{ github.sha }}</a></p>
+            </div>
+          </body>
+          </html>
+          EOF
+          )
+          
+          # Create email headers
+          EMAIL_SUBJECT="🧪 ${{ steps.parse_results.outputs.test_status }} - FakeStore API Tests"
+          
+          # Create email file
+          EMAIL_FILE="email.eml"
+          cat > $EMAIL_FILE <<EOF
+          From: $EMAIL_FROM
+          To: $EMAIL_TO
+          Subject: $EMAIL_SUBJECT
+          MIME-Version: 1.0
+          Content-Type: text/html; charset="UTF-8"
+          
+          $HTML_CONTENT
+          EOF
+          
+          # Determine protocol based on port
+          if [ "$SMTP_PORT" = "465" ]; then
+            PROTOCOL="smtps"
+          else
+            PROTOCOL="smtp"
+          fi
+          
+          # Send email using curl
+          echo "📧 Sending email via $PROTOCOL://$SMTP_SERVER:$SMTP_PORT"
+          curl --url "$PROTOCOL://$SMTP_SERVER:$SMTP_PORT" \
+               --ssl-reqd \
+               --mail-from "$EMAIL_FROM" \
+               --mail-rcpt "$EMAIL_TO" \
+               --upload-file "$EMAIL_FILE" \
+               --user "$SMTP_USERNAME:$SMTP_PASSWORD" \
+               --insecure
+          
+          # Check result
+          if [ $? -eq 0 ]; then
+            echo "✅ Email sent successfully"
+          else
+            echo "❌ Failed to send email"
+          fi
+          
+      - name: Fail job if tests failed
+        if: steps.test_step.outputs.test_exit_code != '0'
+        run: exit 1

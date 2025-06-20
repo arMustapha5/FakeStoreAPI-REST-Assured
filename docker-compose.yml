@@ -1,0 +1,23 @@
+services:
+  fakestoreapi:
+    build: .
+    volumes:
+      - maven-cache:/root/.m2
+    environment:
+      - MAVEN_OPTS=-Dmaven.repo.local=/root/.m2/repository      
+      - PROJECT_NAME=FakeStore API Tests
+      - BUILD_URL=file:///app/target/site/allure-maven-plugin/index.html 
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      
+      - EMAIL_TO=${EMAIL_TO}
+      - EMAIL_FROM=${EMAIL_FROM:-noreply@fakestoreapi.com}
+      - SMTP_SERVER=${SMTP_SERVER:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}   
+    restart: "no"
+
+volumes:
+  maven-cache:
+    driver: local
+
